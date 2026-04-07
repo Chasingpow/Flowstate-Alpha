@@ -1,77 +1,58 @@
 import { useEffect, useMemo, useState } from "react";
 
-const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const STORAGE_KEY = "flowstate-alpha-calendar-clean";
+const STORAGE_KEY = "flowstate-alpha-calendar";
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-function monthKey(year, month) {
+function getMonthKey(year, month) {
   return `${year}-${String(month + 1).padStart(2, "0")}`;
 }
 
-function formatMonthYear(year, month) {
-  return new Date(year, month).toLocaleString("default", {
+function formatMonthLabel(year, month) {
+  return new Date(year, month, 1).toLocaleDateString(undefined, {
     month: "long",
     year: "numeric",
   });
 }
 
-function formatMoney(value, decimals = 0) {
-  const number = Number(value || 0);
-  const sign = number > 0 ? "+" : "";
-  return `${sign}$${number.toFixed(decimals)}`;
+function formatCurrency(value) {
+  const amount = Number(value || 0);
+  const sign = amount > 0 ? "+" : "";
+  return `${sign}$${amount.toFixed(0)}`;
 }
 
-function getMoneyColor(value) {
-  if (value > 0) return "#22c55e";
-  if (value < 0) return "#ef4444";
+function normalizeEntry(entry) {
+  return {
+    pl: entry?.pl ?? "",
+    trades: entry?.trades ?? "",
+    notes: entry?.notes ?? "",
+  };
+}
+
+function getStatusColor(text) {
+  const value = String(text || "").toLowerCase();
+  if (value.includes("saved")) return "#22c55e";
+  if (value.includes("loaded")) return "#38bdf8";
+  if (value.includes("cleared")) return "#f59e0b";
+  if (value.includes("failed") || value.includes("error")) return "#ef4444";
   return "#a1a1aa";
 }
 
-function normalizeEntry(entry = {}) {
-  return {
-    pl: entry.pl ?? "",
-    trades: entry.trades ?? "",
-    notes: entry.notes ?? "",
-    account: entry.account ?? "Main",
-    strategy: entry.strategy ?? "Scalp",
-  };
-}
-
-function downloadCSV(filename, rows) {
-  const escapeCell = (value) => {
-    const str = String(value ?? "");
-    if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-
-  const csv = rows.map((row) => row.map(escapeCell).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 export default function App() {
-  const today = new Date();
+  const now = new Date();
 
-  const [viewYear, setViewYear] = useState(today.getFullYear());
-  const [viewMonth, setViewMonth] = useState(today.getMonth());
+  const [viewYear, setViewYear] = useState(now.getFullYear());
+  const [viewMonth, setViewMonth] = useState(now.getMonth());
   const [allData, setAllData] = useState({});
   const [selectedDay, setSelectedDay] = useState(null);
   const [status, setStatus] = useState("Ready");
-  const [activeAccount, setActiveAccount] = useState("All Accounts");
-  const [activeStrategy, setActiveStrategy] = useState("All Strategies");
+  const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [isMobile, setIsMobile] = useState(
     typeof window !== "undefined" ? window.innerWidth < 900 : false
   );
 
-  const currentKey = monthKey(viewYear, viewMonth);
-  const monthLabel = formatMonthYear(viewYear, viewMonth);
-  const currentMonthData = allData[currentKey] || {};
+  const monthKey = getMonthKey(viewYear, viewMonth);
+  const monthLabel = formatMonthLabel(viewYear, viewMonth);
+  const monthData = allData[monthKey] || {};
 
   const firstDayOfMonth = new Date(viewYear, viewMonth, 1).getDay();
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
@@ -79,264 +60,217 @@ export default function App() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
+
       if (saved) {
         const parsed = JSON.parse(saved);
         setAllData(parsed);
-        setStatus("Loaded automatically");
+        setStatus("Loaded locally");
+      } else {
+        setStatus("Ready");
       }
     } catch (error) {
-      console.log("LOAD ERROR:", error);
+      console.error("Failed to load local data:", error);
       setStatus("Load failed");
+    } finally {
+      setHasLoadedStorage(true);
     }
   }, []);
 
   useEffect(() => {
+    if (!hasLoadedStorage) return;
+
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(allData));
+      setStatus("Saved locally");
     } catch (error) {
-      console.log("SAVE ERROR:", error);
+      console.error("Failed to save local data:", error);
       setStatus("Save failed");
     }
-  }, [allData]);
+  }, [allData, hasLoadedStorage]);
 
   useEffect(() => {
-    const onEscape = (e) => {
-      if (e.key === "Escape") setSelectedDay(null);
-    };
-
-    const onResize = () => {
+    function handleResize() {
       setIsMobile(window.innerWidth < 900);
-    };
+    }
 
-    window.addEventListener("keydown", onEscape);
-    window.addEventListener("resize", onResize);
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setSelectedDay(null);
+      }
+    }
+
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("keydown", handleKeyDown);
 
     return () => {
-      window.removeEventListener("keydown", onEscape);
-      window.removeEventListener("resize", onResize);
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
 
-  const updateEntry = (day, field, value) => {
-    setAllData((prev) => ({
-      ...prev,
-      [currentKey]: {
-        ...(prev[currentKey] || {}),
-        [day]: {
-          ...normalizeEntry((prev[currentKey] || {})[day]),
-          [field]: value,
-        },
-      },
-    }));
-    setStatus("Saved");
-  };
+  function changeMonth(direction) {
+    const nextDate = new Date(viewYear, viewMonth + direction, 1);
+    setViewYear(nextDate.getFullYear());
+    setViewMonth(nextDate.getMonth());
+    setSelectedDay(null);
+  }
 
-  const clearMonth = () => {
+  function updateDayField(day, field, value) {
+    setAllData((prev) => {
+      const prevMonth = prev[monthKey] || {};
+      const prevDay = normalizeEntry(prevMonth[day]);
+
+      return {
+        ...prev,
+        [monthKey]: {
+          ...prevMonth,
+          [day]: {
+            ...prevDay,
+            [field]: value,
+          },
+        },
+      };
+    });
+  }
+
+  function clearSelectedDay() {
+    if (!selectedDay) return;
+
+    setAllData((prev) => {
+      const prevMonth = prev[monthKey] || {};
+      return {
+        ...prev,
+        [monthKey]: {
+          ...prevMonth,
+          [selectedDay]: {
+            pl: "",
+            trades: "",
+            notes: "",
+          },
+        },
+      };
+    });
+
+    setStatus(`Cleared day ${selectedDay}`);
+  }
+
+  function clearMonth() {
+    const confirmed = window.confirm(`Clear all entries for ${monthLabel}?`);
+    if (!confirmed) return;
+
     setAllData((prev) => ({
       ...prev,
-      [currentKey]: {},
+      [monthKey]: {},
     }));
+
     setSelectedDay(null);
     setStatus("Month cleared");
-  };
-
-  const goMonth = (direction) => {
-    const next = new Date(viewYear, viewMonth + direction, 1);
-    setViewYear(next.getFullYear());
-    setViewMonth(next.getMonth());
-    setSelectedDay(null);
-  };
+  }
 
   const selectedEntry = selectedDay
-    ? normalizeEntry(currentMonthData[selectedDay])
+    ? normalizeEntry(monthData[selectedDay])
     : normalizeEntry();
 
-  const accounts = useMemo(() => {
-    const set = new Set(["All Accounts"]);
-    Object.values(currentMonthData).forEach((entry) => {
-      set.add(normalizeEntry(entry).account);
-    });
-    return Array.from(set);
-  }, [currentMonthData]);
+  const entries = useMemo(() => {
+    return Array.from({ length: daysInMonth }, (_, index) => {
+      const day = index + 1;
+      const entry = normalizeEntry(monthData[day]);
 
-  const strategies = useMemo(() => {
-    const set = new Set(["All Strategies"]);
-    Object.values(currentMonthData).forEach((entry) => {
-      set.add(normalizeEntry(entry).strategy);
-    });
-    return Array.from(set);
-  }, [currentMonthData]);
-
-  const entryMatchesFilters = (entry) => {
-    const normalized = normalizeEntry(entry);
-    const accountMatch =
-      activeAccount === "All Accounts" || normalized.account === activeAccount;
-    const strategyMatch =
-      activeStrategy === "All Strategies" ||
-      normalized.strategy === activeStrategy;
-    return accountMatch && strategyMatch;
-  };
-
-  const getPL = (day) => {
-    const entry = currentMonthData[day];
-    if (!entry || !entryMatchesFilters(entry)) return 0;
-    return Number(entry.pl || 0);
-  };
-
-  const getTrades = (day) => {
-    const entry = currentMonthData[day];
-    if (!entry || !entryMatchesFilters(entry)) return 0;
-    return Number(entry.trades || 0);
-  };
-
-  const filteredEntries = Object.entries(currentMonthData)
-    .map(([day, values]) => {
-      const normalized = normalizeEntry(values);
       return {
-        day: Number(day),
-        pl: Number(normalized.pl || 0),
-        trades: Number(normalized.trades || 0),
-        notes: normalized.notes,
-        account: normalized.account,
-        strategy: normalized.strategy,
+        day,
+        pl: Number(entry.pl || 0),
+        trades: Number(entry.trades || 0),
+        notes: entry.notes || "",
       };
-    })
-    .filter((entry) => entry.day >= 1 && entry.day <= daysInMonth)
-    .filter((entry) => entryMatchesFilters(entry))
-    .sort((a, b) => a.day - b.day);
+    });
+  }, [daysInMonth, monthData]);
 
-  const total = filteredEntries.reduce((sum, entry) => sum + entry.pl, 0);
-  const activeDays = filteredEntries.filter(
-    (entry) => entry.pl !== 0 || entry.trades > 0 || entry.notes.trim() !== ""
+  const activeDays = entries.filter((item) => {
+    return item.pl !== 0 || item.trades !== 0 || item.notes.trim() !== "";
+  });
+
+  const monthlyTotal = entries.reduce((sum, item) => sum + item.pl, 0);
+  const totalTrades = entries.reduce((sum, item) => sum + item.trades, 0);
+  const winningDays = entries.filter((item) => item.pl > 0).length;
+  const losingDays = entries.filter((item) => item.pl < 0).length;
+  const flatDays = Math.max(activeDays.length - winningDays - losingDays, 0);
+  const winRate = activeDays.length > 0 ? (winningDays / activeDays.length) * 100 : 0;
+  const avgDay = activeDays.length > 0 ? monthlyTotal / activeDays.length : 0;
+  const avgTrade = totalTrades > 0 ? monthlyTotal / totalTrades : 0;
+
+  const bestDay = entries.reduce(
+    (best, current) => (current.pl > best.pl ? current : best),
+    entries[0] || { day: "-", pl: 0 }
   );
-  const winningDays = filteredEntries.filter((entry) => entry.pl > 0).length;
-  const losingDays = filteredEntries.filter((entry) => entry.pl < 0).length;
-  const totalTrades = filteredEntries.reduce(
-    (sum, entry) => sum + entry.trades,
-    0
+
+  const worstDay = entries.reduce(
+    (worst, current) => (current.pl < worst.pl ? current : worst),
+    entries[0] || { day: "-", pl: 0 }
   );
-  const averageTradePL = totalTrades > 0 ? total / totalTrades : 0;
-  const winRate =
-    activeDays.length > 0 ? (winningDays / activeDays.length) * 100 : 0;
-
-  const bestDay =
-    filteredEntries.length > 0
-      ? filteredEntries.reduce((best, current) =>
-          current.pl > best.pl ? current : best
-        )
-      : null;
-
-  const worstDay =
-    filteredEntries.length > 0
-      ? filteredEntries.reduce((worst, current) =>
-          current.pl < worst.pl ? current : worst
-        )
-      : null;
 
   const equityData = useMemo(() => {
     let running = 0;
-    const points = [];
-
-    for (let day = 1; day <= daysInMonth; day++) {
-      running += getPL(day);
-      points.push({ day, value: running });
-    }
-
-    return points;
-  }, [currentMonthData, activeAccount, activeStrategy, daysInMonth]);
+    return entries.map((item) => {
+      running += item.pl;
+      return {
+        day: item.day,
+        value: running,
+      };
+    });
+  }, [entries]);
 
   const weeks = useMemo(() => {
     const rows = [];
-    let week = Array(firstDayOfMonth).fill(null);
+    let currentWeek = Array(firstDayOfMonth).fill(null);
 
-    for (let day = 1; day <= daysInMonth; day++) {
-      week.push(day);
-      if (week.length === 7) {
-        rows.push(week);
-        week = [];
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      currentWeek.push(day);
+
+      if (currentWeek.length === 7) {
+        rows.push(currentWeek);
+        currentWeek = [];
       }
     }
 
-    if (week.length > 0) {
-      while (week.length < 7) week.push(null);
-      rows.push(week);
+    if (currentWeek.length > 0) {
+      while (currentWeek.length < 7) currentWeek.push(null);
+      rows.push(currentWeek);
     }
 
     return rows;
-  }, [firstDayOfMonth, daysInMonth]);
+  }, [daysInMonth, firstDayOfMonth]);
 
-  const getWeekTotal = (week) => {
-    return week.reduce((sum, day) => {
-      if (!day) return sum;
-      return sum + getPL(day);
-    }, 0);
-  };
+  function getDayPL(day) {
+    if (!day) return 0;
+    return Number(normalizeEntry(monthData[day]).pl || 0);
+  }
 
-  const exportMonthCSV = () => {
-    const rows = [
-      ["Day", "P&L", "Trades", "Account", "Strategy", "Notes"],
-      ...Array.from({ length: daysInMonth }, (_, i) => {
-        const day = i + 1;
-        const entry = normalizeEntry(currentMonthData[day]);
-        return [
-          day,
-          entry.pl,
-          entry.trades,
-          entry.account,
-          entry.strategy,
-          entry.notes,
-        ];
-      }),
-    ];
+  function getDayTrades(day) {
+    if (!day) return 0;
+    return Number(normalizeEntry(monthData[day]).trades || 0);
+  }
 
-    downloadCSV(`flowstate-alpha-${currentKey}.csv`, rows);
-    setStatus("CSV exported");
-  };
+  function getWeekTotal(week) {
+    return week.reduce((sum, day) => sum + getDayPL(day), 0);
+  }
 
-  const shareSummary = async () => {
-    const summary = `${monthLabel}
-Monthly Total: ${formatMoney(total)}
-Win Rate: ${winRate.toFixed(1)}%
-Winning Days: ${winningDays}
-Losing Days: ${losingDays}
-Total Trades: ${totalTrades}`;
-
-    try {
-      if (navigator.share) {
-        await navigator.share({
-          title: `FlowState Alpha - ${monthLabel}`,
-          text: summary,
-        });
-        setStatus("Shared");
-      } else if (navigator.clipboard) {
-        await navigator.clipboard.writeText(summary);
-        setStatus("Summary copied");
-      } else {
-        setStatus("Share not supported");
-      }
-    } catch (error) {
-      console.log("SHARE ERROR:", error);
-      setStatus("Share cancelled");
-    }
-  };
-
-  const renderEquityCurve = () => {
+  function renderEquityCurve() {
     const width = 1200;
-    const height = 260;
-    const pad = 24;
+    const height = 280;
+    const padding = 28;
 
-    const minValue = Math.min(...equityData.map((p) => p.value), 0);
-    const maxValue = Math.max(...equityData.map((p) => p.value), 0);
+    const minValue = Math.min(0, ...equityData.map((point) => point.value));
+    const maxValue = Math.max(0, ...equityData.map((point) => point.value));
     const range = maxValue - minValue || 1;
 
-    const xFor = (index) => {
+    function xFor(index) {
       if (equityData.length <= 1) return width / 2;
-      return pad + (index / (equityData.length - 1)) * (width - pad * 2);
-    };
+      return padding + (index / (equityData.length - 1)) * (width - padding * 2);
+    }
 
-    const yFor = (value) => {
-      return pad + ((maxValue - value) / range) * (height - pad * 2);
-    };
+    function yFor(value) {
+      return padding + ((maxValue - value) / range) * (height - padding * 2);
+    }
 
     const linePath = equityData
       .map((point, index) => {
@@ -346,91 +280,67 @@ Total Trades: ${totalTrades}`;
       })
       .join(" ");
 
-    const areaPath = `${linePath} L ${xFor(
-      equityData.length - 1
-    )} ${height - pad} L ${xFor(0)} ${height - pad} Z`;
-
+    const areaPath = `${linePath} L ${xFor(equityData.length - 1)} ${height - padding} L ${xFor(0)} ${height - padding} Z`;
     const zeroY = yFor(0);
     const finalValue = equityData[equityData.length - 1]?.value || 0;
 
     return (
-      <div style={cardStyle}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-end",
-            gap: 16,
-            marginBottom: 16,
-            flexWrap: "wrap",
-          }}
-        >
+      <section style={panelStyle}>
+        <div style={sectionHeaderStyle}>
           <div>
-            <div style={smallLabelStyle}>Equity Curve</div>
-            <div
-              style={{
-                fontSize: isMobile ? 22 : 28,
-                fontWeight: 800,
-                color: "#fff",
-              }}
-            >
-              Running P&amp;L
-            </div>
+            <div style={eyebrowStyle}>Equity Curve</div>
+            <h3 style={sectionTitleStyle}>Running P and L</h3>
           </div>
+
           <div
             style={{
-              fontSize: isMobile ? 20 : 24,
-              fontWeight: 800,
-              color: getMoneyColor(finalValue),
+              ...pillStyle,
+              color:
+                finalValue > 0 ? "#22c55e" : finalValue < 0 ? "#ef4444" : "#a1a1aa",
             }}
           >
-            {formatMoney(finalValue)}
+            {formatCurrency(finalValue)}
           </div>
         </div>
 
         <div style={{ width: "100%", overflowX: "auto" }}>
           <svg
             viewBox={`0 0 ${width} ${height}`}
-            style={{ width: "100%", height: 260, display: "block" }}
+            style={{ width: "100%", minWidth: 680, display: "block" }}
+            role="img"
+            aria-label="Equity curve"
           >
-            <defs>
-              <linearGradient id="curveFill" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stopColor="rgba(34,197,94,0.28)" />
-                <stop offset="100%" stopColor="rgba(34,197,94,0.02)" />
-              </linearGradient>
-            </defs>
-
             {[0, 0.25, 0.5, 0.75, 1].map((step) => {
-              const y = pad + step * (height - pad * 2);
+              const y = padding + step * (height - padding * 2);
               return (
                 <line
                   key={step}
-                  x1={pad}
+                  x1={padding}
+                  x2={width - padding}
                   y1={y}
-                  x2={width - pad}
                   y2={y}
-                  stroke="#1f2937"
+                  stroke="rgba(255,255,255,0.08)"
                   strokeWidth="1"
-                  strokeDasharray="4 6"
                 />
               );
             })}
 
             <line
-              x1={pad}
+              x1={padding}
+              x2={width - padding}
               y1={zeroY}
-              x2={width - pad}
               y2={zeroY}
-              stroke="#374151"
-              strokeWidth="1.2"
+              stroke="rgba(255,255,255,0.18)"
+              strokeDasharray="6 6"
+              strokeWidth="1.5"
             />
 
-            <path d={areaPath} fill="url(#curveFill)" />
+            <path d={areaPath} fill="rgba(34,197,94,0.10)" />
             <path
               d={linePath}
               fill="none"
               stroke="#22c55e"
-              strokeWidth="3"
+              strokeWidth="4"
               strokeLinecap="round"
               strokeLinejoin="round"
             />
@@ -439,680 +349,828 @@ Total Trades: ${totalTrades}`;
               const x = xFor(index);
               const y = yFor(point.value);
               const showLabel =
-                point.day === 1 ||
-                point.day === daysInMonth ||
-                point.day % 5 === 0;
+                point.day === 1 || point.day === daysInMonth || point.day % 5 === 0;
 
               return (
                 <g key={point.day}>
-                  <circle cx={x} cy={y} r="3.5" fill="#22c55e" />
-                  {showLabel && (
+                  <circle cx={x} cy={y} r="4.5" fill="#22c55e" />
+                  {showLabel ? (
                     <text
                       x={x}
                       y={height - 8}
                       textAnchor="middle"
-                      fill="#9ca3af"
-                      fontSize="12"
+                      fill="rgba(255,255,255,0.65)"
+                      fontSize="14"
                     >
                       {point.day}
                     </text>
-                  )}
+                  ) : null}
                 </g>
               );
             })}
           </svg>
         </div>
-      </div>
+      </section>
     );
-  };
+  }
 
-  const renderDayCard = (day) => {
-    if (!day) {
-      return (
-        <div
-          style={{
-            minHeight: isMobile ? 92 : 125,
-            borderRadius: 22,
-            background: "transparent",
-          }}
-        />
-      );
-    }
+  function renderDayCard(day) {
+    if (!day) return <div style={emptyDayStyle} />;
 
-    const rawEntry = currentMonthData[day];
-    const entry = normalizeEntry(rawEntry);
-    const pl = getPL(day);
-    const trades = getTrades(day);
-    const hasData = Boolean(entry.pl || entry.trades || entry.notes);
-    const selected = selectedDay === day;
+    const entry = normalizeEntry(monthData[day]);
+    const pl = Number(entry.pl || 0);
+    const trades = Number(entry.trades || 0);
+    const hasData = entry.pl !== "" || entry.trades !== "" || entry.notes.trim() !== "";
+    const isSelected = selectedDay === day;
+    const isToday =
+      day === now.getDate() &&
+      viewMonth === now.getMonth() &&
+      viewYear === now.getFullYear();
 
     return (
-      <div
+      <button
+        type="button"
         onClick={() => setSelectedDay(day)}
         style={{
-          minHeight: isMobile ? 92 : 125,
-          padding: isMobile ? 10 : 14,
-          border: selected ? "1px solid #22c55e" : "1px solid #27272a",
-          borderRadius: 22,
-          cursor: "pointer",
-          background: selected
-            ? "linear-gradient(180deg, rgba(34,197,94,0.12), rgba(15,15,15,1))"
-            : "linear-gradient(180deg, rgba(24,24,27,1), rgba(10,10,10,1))",
-          boxShadow: selected
+          ...dayCardStyle,
+          border: isSelected
+            ? "1px solid #22c55e"
+            : isToday
+            ? "1px solid #38bdf8"
+            : "1px solid #27272a",
+          boxShadow: isSelected
             ? "0 0 24px rgba(34,197,94,0.18)"
-            : "0 10px 30px rgba(0,0,0,0.30)",
-          transition: "all 0.2s ease",
+            : "0 12px 30px rgba(0,0,0,0.25)",
+          background: isSelected
+            ? "linear-gradient(180deg, rgba(34,197,94,0.12), rgba(10,10,10,1))"
+            : "linear-gradient(180deg, rgba(24,24,27,1), rgba(10,10,10,1))",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
-          <div
-            style={{
-              width: isMobile ? 28 : 34,
-              height: isMobile ? 28 : 34,
-              borderRadius: 999,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "#18181b",
-              color: "#fff",
-              fontWeight: 700,
-              fontSize: isMobile ? 12 : 14,
-              border: "1px solid #27272a",
-            }}
-          >
-            {day}
-          </div>
-
-          <div
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 999,
-              background: hasData ? "#22c55e" : "#3f3f46",
-              boxShadow: hasData ? "0 0 12px rgba(34,197,94,0.9)" : "none",
-            }}
-          />
+        <div style={dayCardTopStyle}>
+          <span style={dayNumberStyle}>{day}</span>
+          {isToday ? <span style={todayBadgeStyle}>Today</span> : null}
         </div>
 
         <div
           style={{
-            color: getMoneyColor(pl),
-            fontWeight: 700,
-            fontSize: isMobile ? 18 : 22,
-            lineHeight: 1.1,
-            marginBottom: 6,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            ...dayPLStyle,
+            color: pl > 0 ? "#22c55e" : pl < 0 ? "#ef4444" : "#f4f4f5",
           }}
         >
-          {pl !== 0 ? formatMoney(pl) : "—"}
+          {pl !== 0 ? formatCurrency(pl) : "$0"}
         </div>
 
-        {!isMobile && (
-          <div style={{ fontSize: 13, color: hasData ? "#d4d4d8" : "#71717a" }}>
-            {hasData ? `${trades} trade${trades === 1 ? "" : "s"}` : "No entry"}
-          </div>
-        )}
-      </div>
+        <div style={dayMetaStyle}>
+          {hasData ? `${trades} trade${trades === 1 ? "" : "s"}` : "No entry"}
+        </div>
+      </button>
     );
-  };
+  }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background:
-          "radial-gradient(circle at top, rgba(34,197,94,0.10), transparent 22%), #020202",
-        color: "#fff",
-        fontFamily: "Inter, Arial, Helvetica, sans-serif",
-        padding: isMobile ? 14 : 24,
-      }}
-    >
-      <div style={{ maxWidth: 1380, margin: "0 auto" }}>
-        <div
-          style={{
-            textAlign: "center",
-            marginBottom: 22,
-            padding: isMobile ? "24px 14px 16px" : "30px 20px 18px",
-            borderRadius: 28,
-            border: "1px solid #18181b",
-            background:
-              "linear-gradient(180deg, rgba(12,12,12,0.95), rgba(5,5,5,0.98))",
-            boxShadow: "0 25px 60px rgba(0,0,0,0.45)",
-          }}
-        >
-          <div style={topKickerStyle}>Performance Calendar</div>
+    <div style={pageStyle}>
+      <div style={backgroundGlowOne} />
+      <div style={backgroundGlowTwo} />
 
-          <h1
-            style={{
-              margin: 0,
-              fontSize: isMobile ? 36 : 56,
-              color: "#fff",
-              fontWeight: 800,
-              letterSpacing: -1,
-              textShadow: "0 0 20px rgba(255,255,255,0.06)",
-            }}
-          >
-            FlowState Alpha
-          </h1>
-
-          <div
-            style={{
-              marginTop: 10,
-              fontSize: isMobile ? 20 : 24,
-              color: "#d4d4d8",
-              fontWeight: 500,
-            }}
-          >
-            {monthLabel}
+      <main style={shellStyle}>
+        <header style={heroStyle}>
+          <div>
+            <div style={eyebrowStyle}>Performance Calendar</div>
+            <h1 style={titleStyle}>FlowState Alpha</h1>
+            <p style={subtitleStyle}>
+              Track daily P and L, review weekly totals, and monitor your monthly equity curve.
+            </p>
           </div>
 
-          <div
-            style={{
-              marginTop: 14,
-              fontSize: 15,
-              color: (() => {
-                if (status.toLowerCase().includes("saved")) return "#22c55e";
-                if (status.toLowerCase().includes("failed")) return "#ef4444";
-                if (status.toLowerCase().includes("loaded")) return "#38bdf8";
-                if (status.toLowerCase().includes("cleared")) return "#f59e0b";
-                return "#a1a1aa";
-              })(),
-            }}
-          >
-            Status: {status}
-          </div>
-
-          <div
-            style={{
-              marginTop: 18,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 12,
-              padding: "14px 22px",
-              borderRadius: 18,
-              border: "1px solid #1f2937",
-              background:
-                "linear-gradient(180deg, rgba(9,9,11,1), rgba(3,3,3,1))",
-              boxShadow:
-                total > 0
-                  ? "0 0 25px rgba(34,197,94,0.12)"
-                  : total < 0
-                  ? "0 0 25px rgba(239,68,68,0.10)"
-                  : "0 10px 30px rgba(0,0,0,0.35)",
-              maxWidth: "100%",
-            }}
-          >
-            <span style={{ color: "#a1a1aa", fontSize: isMobile ? 14 : 16 }}>
-              Monthly Total
-            </span>
-            <span
+          <div style={heroRightStyle}>
+            <div
               style={{
-                color: getMoneyColor(total),
-                fontSize: isMobile ? 28 : 34,
-                fontWeight: 800,
-                letterSpacing: -1,
-                whiteSpace: "nowrap",
+                ...pillStyle,
+                color: getStatusColor(status),
+                borderColor: "rgba(255,255,255,0.08)",
               }}
             >
-              {formatMoney(total)}
-            </span>
+              Status: {status}
+            </div>
+
+            <div style={ctaRowStyle}>
+              <a
+                href="https://discord.com/"
+                target="_blank"
+                rel="noreferrer"
+                style={primaryButtonStyle}
+              >
+                Discord
+              </a>
+
+              <a
+                href="https://flowstate-alpha-six.vercel.app/"
+                target="_blank"
+                rel="noreferrer"
+                style={secondaryButtonStyle}
+              >
+                Website
+              </a>
+            </div>
           </div>
-        </div>
+        </header>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            justifyContent: "center",
-            marginBottom: 22,
-            flexWrap: "wrap",
-          }}
-        >
-          <button onClick={() => goMonth(-1)} style={buttonStyle}>
-            ← Prev
-          </button>
-          <button onClick={() => goMonth(1)} style={buttonStyle}>
-            Next →
-          </button>
+        <section style={toolbarPanelStyle}>
+          <div style={monthNavStyle}>
+            <button type="button" onClick={() => changeMonth(-1)} style={secondaryButtonStyle}>
+              Prev
+            </button>
 
-          <select
-            value={activeAccount}
-            onChange={(e) => setActiveAccount(e.target.value)}
-            style={selectStyle}
-          >
-            {accounts.map((account) => (
-              <option key={account} value={account}>
-                {account}
-              </option>
-            ))}
-          </select>
+            <div style={monthLabelStyle}>{monthLabel}</div>
 
-          <select
-            value={activeStrategy}
-            onChange={(e) => setActiveStrategy(e.target.value)}
-            style={selectStyle}
-          >
-            {strategies.map((strategy) => (
-              <option key={strategy} value={strategy}>
-                {strategy}
-              </option>
-            ))}
-          </select>
+            <button type="button" onClick={() => changeMonth(1)} style={secondaryButtonStyle}>
+              Next
+            </button>
+          </div>
 
-          <button onClick={shareSummary} style={buttonStyle}>
-            Share
-          </button>
-          <button onClick={exportMonthCSV} style={buttonStyle}>
-            Export CSV
-          </button>
-          <button onClick={clearMonth} style={buttonStyle}>
+          <button type="button" onClick={clearMonth} style={dangerButtonStyle}>
             Clear Month
           </button>
-        </div>
+        </section>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(7, 1fr)",
-            gap: 14,
-            marginBottom: 28,
-          }}
-        >
-          <StatCard label="Win Rate" value={`${winRate.toFixed(1)}%`} />
-          <StatCard
-            label="Winning Days"
-            value={String(winningDays)}
-            color="#22c55e"
-          />
-          <StatCard
-            label="Losing Days"
-            value={String(losingDays)}
-            color="#ef4444"
-          />
-          <StatCard label="Total Trades" value={String(totalTrades)} />
-          <StatCard
-            label="Avg P&L / Trade"
-            value={formatMoney(averageTradePL, 2)}
-            color={getMoneyColor(averageTradePL)}
-          />
-          <StatCard
-            label="Best Day"
-            value={bestDay ? formatMoney(bestDay.pl) : "$0"}
-            subtitle={bestDay ? `Day ${bestDay.day}` : "No data"}
-            color="#22c55e"
-          />
-          <StatCard
-            label="Worst Day"
-            value={worstDay ? formatMoney(worstDay.pl) : "$0"}
-            subtitle={worstDay ? `Day ${worstDay.day}` : "No data"}
-            color="#ef4444"
-          />
-        </div>
+        <section style={statsGridStyle}>
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Monthly Total</div>
+            <div
+              style={{
+                ...statValueStyle,
+                color: monthlyTotal > 0 ? "#22c55e" : monthlyTotal < 0 ? "#ef4444" : "#ffffff",
+              }}
+            >
+              {formatCurrency(monthlyTotal)}
+            </div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Weekly Totals</div>
+            <div style={statValueStyle}>{weeks.length}</div>
+            <div style={statHintStyle}>Weeks this month</div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Win Rate</div>
+            <div style={statValueStyle}>{winRate.toFixed(1)}%</div>
+            <div style={statHintStyle}>
+              {winningDays} win / {losingDays} loss / {flatDays} flat
+            </div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Total Trades</div>
+            <div style={statValueStyle}>{totalTrades}</div>
+            <div style={statHintStyle}>Avg trade {formatCurrency(avgTrade)}</div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Best Day</div>
+            <div style={{ ...statValueStyle, color: "#22c55e" }}>
+              {bestDay?.day ? `Day ${bestDay.day}` : "-"}
+            </div>
+            <div style={statHintStyle}>
+              {bestDay ? formatCurrency(bestDay.pl) : "No data"}
+            </div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Worst Day</div>
+            <div style={{ ...statValueStyle, color: "#ef4444" }}>
+              {worstDay?.day ? `Day ${worstDay.day}` : "-"}
+            </div>
+            <div style={statHintStyle}>
+              {worstDay ? formatCurrency(worstDay.pl) : "No data"}
+            </div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Active Days</div>
+            <div style={statValueStyle}>{activeDays.length}</div>
+            <div style={statHintStyle}>Avg day {formatCurrency(avgDay)}</div>
+          </div>
+
+          <div style={statCardStyle}>
+            <div style={statLabelStyle}>Storage</div>
+            <div style={statValueStyle}>Local</div>
+            <div style={statHintStyle}>Auto saves in browser</div>
+          </div>
+        </section>
 
         {renderEquityCurve()}
 
-        {!isMobile && (
-          <>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
-                gap: 12,
-                marginBottom: 16,
-              }}
-            >
-              {dayNames.map((day) => (
-                <div key={day} style={weekdayHeaderStyle}>
-                  {day}
-                </div>
-              ))}
-              <div style={weekdayHeaderStyle}>Week</div>
+        <section style={panelStyle}>
+          <div style={sectionHeaderStyle}>
+            <div>
+              <div style={eyebrowStyle}>Calendar</div>
+              <h3 style={sectionTitleStyle}>Monthly View</h3>
             </div>
+          </div>
 
-            <div style={{ display: "grid", gap: 12 }}>
-              {weeks.map((week, weekIndex) => {
-                const weekTotal = getWeekTotal(week);
+          {!isMobile ? (
+            <div style={desktopCalendarWrapStyle}>
+              <div style={weekdayRowStyle}>
+                {DAY_NAMES.map((name) => (
+                  <div key={name} style={weekdayCellStyle}>
+                    {name}
+                  </div>
+                ))}
+                <div style={weekdayCellStyle}>Week Total</div>
+              </div>
 
-                return (
-                  <div
-                    key={weekIndex}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
-                      gap: 12,
-                    }}
-                  >
-                    {week.map((day, index) => (
-                      <div key={`${weekIndex}-${index}`}>{renderDayCard(day)}</div>
-                    ))}
+              <div style={weeksGridStyle}>
+                {weeks.map((week, index) => {
+                  const weekTotal = getWeekTotal(week);
 
-                    <div
-                      style={{
-                        ...cardStyle,
-                        minHeight: 125,
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        padding: 14,
-                        overflow: "hidden",
-                      }}
-                    >
-                      <div style={smallLabelStyle}>Week Total</div>
-                      <div
-                        style={{
-                          color: getMoneyColor(weekTotal),
-                          fontSize: 24,
-                          fontWeight: 800,
-                          letterSpacing: -0.5,
-                          textAlign: "center",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          width: "100%",
-                        }}
-                        title={formatMoney(weekTotal)}
-                      >
-                        {formatMoney(weekTotal)}
+                  return (
+                    <div key={`week-${index}`} style={weekRowStyle}>
+                      {week.map((day, dayIndex) => (
+                        <div key={`${index}-${dayIndex}`}>{renderDayCard(day)}</div>
+                      ))}
+
+                      <div style={weekTotalCardStyle}>
+                        <div style={weekTotalLabelStyle}>Week Total</div>
+                        <div
+                          style={{
+                            ...weekTotalValueStyle,
+                            color:
+                              weekTotal > 0
+                                ? "#22c55e"
+                                : weekTotal < 0
+                                ? "#ef4444"
+                                : "#f4f4f5",
+                          }}
+                        >
+                          {formatCurrency(weekTotal)}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-          </>
-        )}
+          ) : (
+            <div style={mobileListStyle}>
+              {Array.from({ length: daysInMonth }, (_, index) => index + 1).map((day) => (
+                <div key={day}>{renderDayCard(day)}</div>
+              ))}
+            </div>
+          )}
+        </section>
+      </main>
 
-        {isMobile && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
-            {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => (
-              <div key={day}>{renderDayCard(day)}</div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {selectedDay && (
-        <div
-          onClick={() => setSelectedDay(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.72)",
-            backdropFilter: "blur(8px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 20,
-            zIndex: 1000,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "100%",
-              maxWidth: 560,
-              border: "1px solid #27272a",
-              borderRadius: 28,
-              background:
-                "linear-gradient(180deg, rgba(16,16,16,0.98), rgba(6,6,6,0.98))",
-              boxShadow:
-                "0 30px 80px rgba(0,0,0,0.55), 0 0 30px rgba(34,197,94,0.08)",
-              padding: 28,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 20,
-              }}
-            >
+      {selectedDay ? (
+        <div style={modalOverlayStyle} onClick={() => setSelectedDay(null)}>
+          <div style={modalCardStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={modalHeaderStyle}>
               <div>
-                <div style={smallLabelStyle}>Edit Trading Day</div>
-                <h2
-                  style={{
-                    margin: 0,
-                    fontSize: 32,
-                    letterSpacing: -0.5,
-                  }}
-                >
-                  Day {selectedDay}
-                </h2>
+                <div style={eyebrowStyle}>Day Editor</div>
+                <h2 style={modalTitleStyle}>Day {selectedDay}</h2>
               </div>
 
               <button
+                type="button"
                 onClick={() => setSelectedDay(null)}
-                style={{
-                  width: 42,
-                  height: 42,
-                  borderRadius: 999,
-                  border: "1px solid #27272a",
-                  background: "#0a0a0a",
-                  color: "#fff",
-                  cursor: "pointer",
-                  fontSize: 18,
-                  fontWeight: 700,
-                }}
+                style={closeButtonStyle}
+                aria-label="Close editor"
               >
-                ×
+                X
               </button>
             </div>
 
-            <div style={{ display: "grid", gap: 18 }}>
-              <Field label="P&L">
+            <div style={formGridStyle}>
+              <label style={fieldStyle}>
+                <span style={labelStyle}>P and L</span>
                 <input
-                  placeholder="Enter P&L"
+                  type="number"
+                  inputMode="decimal"
                   value={selectedEntry.pl}
-                  onChange={(e) => updateEntry(selectedDay, "pl", e.target.value)}
+                  onChange={(event) => updateDayField(selectedDay, "pl", event.target.value)}
+                  placeholder="0"
                   style={inputStyle}
                 />
-              </Field>
+              </label>
 
-              <Field label="Trades">
+              <label style={fieldStyle}>
+                <span style={labelStyle}>Trades</span>
                 <input
-                  placeholder="Number of trades"
+                  type="number"
+                  inputMode="numeric"
                   value={selectedEntry.trades}
-                  onChange={(e) =>
-                    updateEntry(selectedDay, "trades", e.target.value)
-                  }
+                  onChange={(event) => updateDayField(selectedDay, "trades", event.target.value)}
+                  placeholder="0"
                   style={inputStyle}
                 />
-              </Field>
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-                  gap: 12,
-                }}
-              >
-                <Field label="Account">
-                  <select
-                    value={selectedEntry.account}
-                    onChange={(e) =>
-                      updateEntry(selectedDay, "account", e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {["Main", "Challenge", "Swing", "IRA"].map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-
-                <Field label="Strategy">
-                  <select
-                    value={selectedEntry.strategy}
-                    onChange={(e) =>
-                      updateEntry(selectedDay, "strategy", e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {["Scalp", "Momentum", "Breakout", "Reversal", "Swing"].map(
-                      (option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      )
-                    )}
-                  </select>
-                </Field>
-              </div>
-
-              <Field label="Notes">
-                <textarea
-                  placeholder="Trade notes"
-                  value={selectedEntry.notes}
-                  onChange={(e) =>
-                    updateEntry(selectedDay, "notes", e.target.value)
-                  }
-                  style={{ ...inputStyle, minHeight: 160, resize: "vertical" }}
-                />
-              </Field>
+              </label>
             </div>
 
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginTop: 22,
-                gap: 12,
-                flexWrap: "wrap",
-              }}
-            >
-              <div style={{ color: "#71717a", fontSize: 14 }}>
-                Auto-saves while you type
+            <label style={fieldStyle}>
+              <span style={labelStyle}>Notes</span>
+              <textarea
+                rows={6}
+                value={selectedEntry.notes}
+                onChange={(event) => updateDayField(selectedDay, "notes", event.target.value)}
+                placeholder="What happened today?"
+                style={textareaStyle}
+              />
+            </label>
+
+            <div style={editorSummaryStyle}>
+              <div style={editorSummaryCardStyle}>
+                <div style={statLabelStyle}>Day P and L</div>
+                <div
+                  style={{
+                    ...statValueStyle,
+                    fontSize: 24,
+                    color:
+                      Number(selectedEntry.pl || 0) > 0
+                        ? "#22c55e"
+                        : Number(selectedEntry.pl || 0) < 0
+                        ? "#ef4444"
+                        : "#ffffff",
+                  }}
+                >
+                  {formatCurrency(Number(selectedEntry.pl || 0))}
+                </div>
               </div>
-              <button onClick={() => setSelectedDay(null)} style={buttonStyle}>
+
+              <div style={editorSummaryCardStyle}>
+                <div style={statLabelStyle}>Trades</div>
+                <div style={{ ...statValueStyle, fontSize: 24 }}>
+                  {getDayTrades(selectedDay)}
+                </div>
+              </div>
+            </div>
+
+            <div style={modalActionsStyle}>
+              <button type="button" onClick={clearSelectedDay} style={dangerButtonStyle}>
+                Clear Day
+              </button>
+
+              <button type="button" onClick={() => setSelectedDay(null)} style={primaryButtonStyle}>
                 Done
               </button>
             </div>
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, subtitle, color = "#ffffff" }) {
-  return (
-    <div style={statCardStyleShared}>
-      <div style={smallLabelStyle}>{label}</div>
-      <div
-        style={{
-          color,
-          fontSize: 20,
-          fontWeight: 700,
-          letterSpacing: -0.3,
-          lineHeight: 1.1,
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-      >
-        {value}
-      </div>
-      {subtitle ? (
-        <div style={{ color: "#a1a1aa", fontSize: 12, marginTop: 6 }}>
-          {subtitle}
         </div>
       ) : null}
     </div>
   );
 }
 
-function Field({ label, children }) {
-  return (
-    <div>
-      <div
-        style={{
-          marginBottom: 8,
-          color: "#d4d4d8",
-          fontWeight: 600,
-          fontSize: 15,
-        }}
-      >
-        {label}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-const cardStyle = {
-  border: "1px solid #27272a",
-  borderRadius: 24,
-  background: "linear-gradient(180deg, rgba(24,24,27,1), rgba(10,10,10,1))",
-  boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-};
-
-const statCardStyleShared = {
-  border: "1px solid #27272a",
-  borderRadius: 18,
-  background: "linear-gradient(180deg, rgba(24,24,27,1), rgba(10,10,10,1))",
-  boxShadow: "0 8px 20px rgba(0,0,0,0.25)",
-  padding: 14,
-  minHeight: 100,
-  display: "flex",
-  flexDirection: "column",
-  justifyContent: "space-between",
+const pageStyle = {
+  minHeight: "100vh",
+  background:
+    "radial-gradient(circle at top, rgba(34,197,94,0.12), transparent 24%), linear-gradient(180deg, #050505 0%, #0a0a0a 100%)",
+  color: "#ffffff",
+  position: "relative",
   overflow: "hidden",
 };
 
-const smallLabelStyle = {
-  color: "#71717a",
-  fontSize: 11,
+const backgroundGlowOne = {
+  position: "fixed",
+  top: -120,
+  right: -120,
+  width: 320,
+  height: 320,
+  borderRadius: "50%",
+  background: "rgba(34,197,94,0.10)",
+  filter: "blur(90px)",
+  pointerEvents: "none",
+};
+
+const backgroundGlowTwo = {
+  position: "fixed",
+  bottom: -160,
+  left: -100,
+  width: 360,
+  height: 360,
+  borderRadius: "50%",
+  background: "rgba(56,189,248,0.08)",
+  filter: "blur(100px)",
+  pointerEvents: "none",
+};
+
+const shellStyle = {
+  width: "min(1200px, calc(100% - 24px))",
+  margin: "0 auto",
+  padding: "24px 0 56px",
+  position: "relative",
+  zIndex: 1,
+};
+
+const heroStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 20,
+  alignItems: "flex-start",
+  flexWrap: "wrap",
+  marginBottom: 20,
+  padding: 24,
+  borderRadius: 28,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  backdropFilter: "blur(16px)",
+  boxShadow: "0 18px 50px rgba(0,0,0,0.28)",
+};
+
+const heroRightStyle = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-end",
+  gap: 12,
+  width: "100%",
+  maxWidth: 380,
+};
+
+const eyebrowStyle = {
+  fontSize: 12,
+  letterSpacing: "0.16em",
   textTransform: "uppercase",
-  letterSpacing: 1.4,
+  color: "#a1a1aa",
   marginBottom: 8,
 };
 
-const topKickerStyle = {
+const titleStyle = {
+  margin: 0,
+  fontSize: "clamp(32px, 6vw, 56px)",
+  lineHeight: 1,
+  fontWeight: 800,
+};
+
+const subtitleStyle = {
+  margin: "12px 0 0",
+  color: "#d4d4d8",
+  fontSize: 16,
+  lineHeight: 1.6,
+  maxWidth: 640,
+};
+
+const toolbarPanelStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 16,
+  flexWrap: "wrap",
+  marginBottom: 20,
+  padding: 20,
+  borderRadius: 24,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const monthNavStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const monthLabelStyle = {
+  fontSize: 20,
+  fontWeight: 700,
+  minWidth: 180,
+};
+
+const ctaRowStyle = {
+  display: "flex",
+  gap: 12,
+  flexWrap: "wrap",
+  justifyContent: "flex-end",
+};
+
+const baseButtonStyle = {
+  border: "1px solid rgba(255,255,255,0.10)",
+  borderRadius: 16,
+  padding: "12px 16px",
+  fontSize: 14,
+  fontWeight: 700,
+  cursor: "pointer",
+  textDecoration: "none",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  transition: "transform 0.2s ease, opacity 0.2s ease",
+};
+
+const primaryButtonStyle = {
+  ...baseButtonStyle,
+  background: "#22c55e",
+  color: "#04110a",
+};
+
+const secondaryButtonStyle = {
+  ...baseButtonStyle,
+  background: "rgba(255,255,255,0.04)",
+  color: "#ffffff",
+};
+
+const dangerButtonStyle = {
+  ...baseButtonStyle,
+  background: "rgba(239,68,68,0.12)",
+  color: "#fecaca",
+};
+
+const pillStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "10px 14px",
+  borderRadius: 999,
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.10)",
   fontSize: 13,
-  color: "#71717a",
-  letterSpacing: 3,
+  fontWeight: 700,
+};
+
+const statsGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 14,
+  marginBottom: 20,
+};
+
+const statCardStyle = {
+  padding: 18,
+  borderRadius: 22,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02))",
+  boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
+};
+
+const statLabelStyle = {
+  fontSize: 12,
+  letterSpacing: "0.12em",
   textTransform: "uppercase",
+  color: "#a1a1aa",
   marginBottom: 10,
 };
 
-const weekdayHeaderStyle = {
-  textAlign: "center",
-  fontWeight: 700,
-  fontSize: 13,
-  color: "#a1a1aa",
-  letterSpacing: 1.5,
-  textTransform: "uppercase",
-  paddingBottom: 6,
+const statValueStyle = {
+  fontSize: 30,
+  lineHeight: 1.1,
+  fontWeight: 800,
+  color: "#ffffff",
 };
 
-const buttonStyle = {
-  padding: "10px 16px",
-  borderRadius: 12,
-  border: "1px solid #27272a",
-  background: "linear-gradient(180deg, #18181b, #09090b)",
+const statHintStyle = {
+  marginTop: 8,
+  fontSize: 13,
+  color: "#d4d4d8",
+};
+
+const panelStyle = {
+  marginBottom: 20,
+  padding: 20,
+  borderRadius: 28,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  boxShadow: "0 18px 50px rgba(0,0,0,0.24)",
+};
+
+const sectionHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+  marginBottom: 16,
+  flexWrap: "wrap",
+};
+
+const sectionTitleStyle = {
+  margin: 0,
+  fontSize: 24,
+  fontWeight: 800,
+};
+
+const desktopCalendarWrapStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+};
+
+const weekdayRowStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const weekdayCellStyle = {
+  color: "#a1a1aa",
+  fontSize: 13,
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  padding: "0 4px",
+};
+
+const weeksGridStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+};
+
+const weekRowStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+  gap: 12,
+  alignItems: "stretch",
+};
+
+const dayCardStyle = {
+  width: "100%",
+  minHeight: 120,
+  textAlign: "left",
+  padding: 14,
+  borderRadius: 22,
   color: "#ffffff",
   cursor: "pointer",
-  fontWeight: 600,
-  fontSize: 14,
-  boxShadow: "0 8px 20px rgba(0,0,0,0.28)",
 };
 
-const selectStyle = {
-  ...buttonStyle,
-  padding: "10px 12px",
-  appearance: "none",
+const emptyDayStyle = {
+  minHeight: 120,
+  borderRadius: 22,
+  background: "rgba(255,255,255,0.02)",
+  border: "1px dashed rgba(255,255,255,0.05)",
 };
+
+const dayCardTopStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 8,
+  marginBottom: 12,
+};
+
+const dayNumberStyle = {
+  fontSize: 18,
+  fontWeight: 800,
+};
+
+const todayBadgeStyle = {
+  fontSize: 11,
+  padding: "4px 8px",
+  borderRadius: 999,
+  background: "rgba(56,189,248,0.14)",
+  color: "#7dd3fc",
+  border: "1px solid rgba(56,189,248,0.25)",
+};
+
+const dayPLStyle = {
+  fontSize: 24,
+  fontWeight: 800,
+  marginBottom: 12,
+};
+
+const dayMetaStyle = {
+  fontSize: 13,
+  color: "#d4d4d8",
+};
+
+const weekTotalCardStyle = {
+  minHeight: 120,
+  borderRadius: 22,
+  padding: 14,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))",
+  display: "flex",
+  flexDirection: "column",
+  justifyContent: "space-between",
+};
+
+const weekTotalLabelStyle = {
+  fontSize: 12,
+  textTransform: "uppercase",
+  letterSpacing: "0.12em",
+  color: "#a1a1aa",
+};
+
+const weekTotalValueStyle = {
+  fontSize: 26,
+  fontWeight: 800,
+};
+
+const mobileListStyle = {
+  display: "grid",
+  gridTemplateColumns: "1fr",
+  gap: 12,
+};
+
+const modalOverlayStyle = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.72)",
+  backdropFilter: "blur(8px)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 18,
+  zIndex: 1000,
+};
+
+const modalCardStyle = {
+  width: "100%",
+  maxWidth: 620,
+  maxHeight: "90vh",
+  overflowY: "auto",
+  padding: 24,
+  borderRadius: 28,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "linear-gradient(180deg, rgba(18,18,18,0.98), rgba(8,8,8,0.98))",
+  boxShadow: "0 30px 80px rgba(0,0,0,0.55)",
+};
+
+const modalHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 12,
+  marginBottom: 20,
+};
+
+const modalTitleStyle = {
+  margin: 0,
+  fontSize: 30,
+  fontWeight: 800,
+};
+
+const closeButtonStyle = {
+  width: 42,
+  height: 42,
+  borderRadius: 999,
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.04)",
+  color: "#ffffff",
+  cursor: "pointer",
+  fontSize: 20,
+  lineHeight: 1,
+};
+
+const formGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 14,
+  marginBottom: 14,
+};
+
+const fieldStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+  marginBottom: 14,
+};
+
+const labelStyle = {
+  fontSize: 13,
+  fontWeight: 700,
+  color: "#d4d4d8",
+};
+
+const inputStyle = {
+  width: "100%",
+  borderRadius: 16,
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.04)",
+  color: "#ffffff",
+  padding: "14px 16px",
+  fontSize: 16,
+  outline: "none",
+  boxSizing: "border-box",
+};
+
+const textareaStyle = {
+  width: "100%",
+  borderRadius: 16,
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.04)",
+  color: "#ffffff",
+  padding: "14px 16px",
+  fontSize: 16,
+  outline: "none",
+  resize: "vertical",
+  boxSizing: "border-box",
+};
+
+const editorSummaryStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 14,
+  marginTop: 8,
+};
+
+const editorSummaryCardStyle = {
+  padding: 16,
+  borderRadius: 20,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const modalActionsStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 12,
+  flexWrap: "wrap",
+  marginTop: 22,
+}
