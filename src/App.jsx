@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./supabase";
 
-const STORAGE_KEY = "flowstate-alpha-calendar";
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function getMonthKey(year, month) {
@@ -37,15 +37,24 @@ function getStatusColor(text) {
   return "#a1a1aa";
 }
 
+function getEntryDateString(year, month, day) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
 export default function App() {
   const now = new Date();
+
+  const [session, setSession] = useState(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState("signin");
 
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth());
   const [allData, setAllData] = useState({});
   const [selectedDay, setSelectedDay] = useState(null);
   const [status, setStatus] = useState("Ready");
-  const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
+  const [hasLoadedCloudMonth, setHasLoadedCloudMonth] = useState(false);
   const [isMobile, setIsMobile] = useState(
     typeof window !== "undefined" ? window.innerWidth < 900 : false
   );
@@ -58,35 +67,20 @@ export default function App() {
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session ?? null);
+    });
 
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        setAllData(parsed);
-        setStatus("Loaded locally");
-      } else {
-        setStatus("Ready");
-      }
-    } catch (error) {
-      console.error("Failed to load local data:", error);
-      setStatus("Load failed");
-    } finally {
-      setHasLoadedStorage(true);
-    }
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession ?? null);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
-
-  useEffect(() => {
-    if (!hasLoadedStorage) return;
-
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(allData));
-      setStatus("Saved locally");
-    } catch (error) {
-      console.error("Failed to save local data:", error);
-      setStatus("Save failed");
-    }
-  }, [allData, hasLoadedStorage]);
 
   useEffect(() => {
     function handleResize() {
@@ -108,6 +102,102 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!session) {
+      setAllData({});
+      setSelectedDay(null);
+      setHasLoadedCloudMonth(false);
+      return;
+    }
+
+    async function loadMonthFromSupabase() {
+      setHasLoadedCloudMonth(false);
+      setStatus("Loading from cloud...");
+
+      const startDate = getEntryDateString(viewYear, viewMonth, 1);
+      const endDate = getEntryDateString(viewYear, viewMonth, daysInMonth);
+
+      const { data, error } = await supabase
+        .from("journal_entries")
+        .select("entry_date, pl, trades, notes")
+        .gte("entry_date", startDate)
+        .lte("entry_date", endDate)
+        .order("entry_date", { ascending: true });
+
+      if (error) {
+        console.error("Cloud load failed:", error);
+        setStatus("Cloud load failed");
+        setHasLoadedCloudMonth(true);
+        return;
+      }
+
+      const mappedMonth = {};
+
+      for (const row of data || []) {
+        const day = Number(String(row.entry_date).slice(8, 10));
+        mappedMonth[day] = {
+          pl: row.pl == null ? "" : String(row.pl),
+          trades: row.trades == null ? "" : String(row.trades),
+          notes: row.notes ?? "",
+        };
+      }
+
+      setAllData((prev) => ({
+        ...prev,
+        [monthKey]: mappedMonth,
+      }));
+
+      setStatus("Loaded from cloud");
+      setHasLoadedCloudMonth(true);
+    }
+
+    loadMonthFromSupabase();
+  }, [session, viewYear, viewMonth, daysInMonth, monthKey]);
+
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    setStatus(mode === "signin" ? "Signing in..." : "Creating account...");
+
+    if (!email || !password) {
+      setStatus("Email and password are required");
+      return;
+    }
+
+    try {
+      if (mode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+
+        if (error) throw error;
+        setStatus("Signed in");
+      } else {
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+        });
+
+        if (error) throw error;
+        setStatus("Account created. Check your email if confirmation is required.");
+      }
+    } catch (error) {
+      setStatus(error.message || "Authentication failed");
+    }
+  }
+
+  async function handleSignOut() {
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      setStatus(error.message || "Sign out failed");
+      return;
+    }
+
+    setSelectedDay(null);
+    setStatus("Signed out");
+  }
+
   function changeMonth(direction) {
     const nextDate = new Date(viewYear, viewMonth + direction, 1);
     setViewYear(nextDate.getFullYear());
@@ -115,48 +205,112 @@ export default function App() {
     setSelectedDay(null);
   }
 
-  function updateDayField(day, field, value) {
-    setAllData((prev) => {
-      const prevMonth = prev[monthKey] || {};
-      const prevDay = normalizeEntry(prevMonth[day]);
+  async function saveDayToCloud(day, nextEntry) {
+    if (!session?.user?.id) return;
 
-      return {
-        ...prev,
-        [monthKey]: {
-          ...prevMonth,
-          [day]: {
-            ...prevDay,
-            [field]: value,
-          },
-        },
-      };
-    });
+    const entryDate = getEntryDateString(viewYear, viewMonth, day);
+    const hasAnyData =
+      nextEntry.pl !== "" || nextEntry.trades !== "" || nextEntry.notes.trim() !== "";
+
+    if (!hasAnyData) {
+      const { error } = await supabase
+        .from("journal_entries")
+        .delete()
+        .eq("user_id", session.user.id)
+        .eq("entry_date", entryDate);
+
+      if (error) {
+        console.error("Delete failed:", error);
+        setStatus("Cloud delete failed");
+        return;
+      }
+
+      setStatus("Saved to cloud");
+      return;
+    }
+
+    const payload = {
+      user_id: session.user.id,
+      entry_date: entryDate,
+      pl: nextEntry.pl === "" ? 0 : Number(nextEntry.pl),
+      trades: nextEntry.trades === "" ? 0 : Number(nextEntry.trades),
+      notes: nextEntry.notes,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from("journal_entries")
+      .upsert(payload, { onConflict: "user_id,entry_date" });
+
+    if (error) {
+      console.error("Cloud save failed:", error);
+      setStatus("Cloud save failed");
+      return;
+    }
+
+    setStatus("Saved to cloud");
   }
 
-  function clearSelectedDay() {
+  function updateDayField(day, field, value) {
+    const currentMonth = allData[monthKey] || {};
+    const currentDay = normalizeEntry(currentMonth[day]);
+    const nextEntry = {
+      ...currentDay,
+      [field]: value,
+    };
+
+    setAllData((prev) => ({
+      ...prev,
+      [monthKey]: {
+        ...(prev[monthKey] || {}),
+        [day]: nextEntry,
+      },
+    }));
+
+    if (hasLoadedCloudMonth) {
+      saveDayToCloud(day, nextEntry);
+    }
+  }
+
+  async function clearSelectedDay() {
     if (!selectedDay) return;
 
-    setAllData((prev) => {
-      const prevMonth = prev[monthKey] || {};
-      return {
-        ...prev,
-        [monthKey]: {
-          ...prevMonth,
-          [selectedDay]: {
-            pl: "",
-            trades: "",
-            notes: "",
-          },
-        },
-      };
-    });
+    const nextEntry = {
+      pl: "",
+      trades: "",
+      notes: "",
+    };
 
+    setAllData((prev) => ({
+      ...prev,
+      [monthKey]: {
+        ...(prev[monthKey] || {}),
+        [selectedDay]: nextEntry,
+      },
+    }));
+
+    await saveDayToCloud(selectedDay, nextEntry);
     setStatus(`Cleared day ${selectedDay}`);
   }
 
-  function clearMonth() {
+  async function clearMonth() {
     const confirmed = window.confirm(`Clear all entries for ${monthLabel}?`);
     if (!confirmed) return;
+
+    const startDate = getEntryDateString(viewYear, viewMonth, 1);
+    const endDate = getEntryDateString(viewYear, viewMonth, daysInMonth);
+
+    const { error } = await supabase
+      .from("journal_entries")
+      .delete()
+      .gte("entry_date", startDate)
+      .lte("entry_date", endDate);
+
+    if (error) {
+      console.error("Clear month failed:", error);
+      setStatus("Clear month failed");
+      return;
+    }
 
     setAllData((prev) => ({
       ...prev,
@@ -427,6 +581,63 @@ export default function App() {
     );
   }
 
+  if (!session) {
+    return (
+      <div style={pageStyle}>
+        <div style={cardStyle}>
+          <div style={eyebrowStyle}>FlowState Alpha</div>
+          <h1 style={titleStyle}>{mode === "signin" ? "Sign In" : "Create Account"}</h1>
+          <p style={subtitleStyle}>
+            Use your email and password to access your private trading calendar.
+          </p>
+
+          <form onSubmit={handleAuthSubmit} style={formStyle}>
+            <label style={fieldStyle}>
+              <span style={labelStyle}>Email</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+                style={inputStyle}
+              />
+            </label>
+
+            <label style={fieldStyle}>
+              <span style={labelStyle}>Password</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Your password"
+                style={inputStyle}
+              />
+            </label>
+
+            <button type="submit" style={primaryButtonStyle}>
+              {mode === "signin" ? "Sign In" : "Create Account"}
+            </button>
+          </form>
+
+          <button
+            type="button"
+            onClick={() => {
+              setMode(mode === "signin" ? "signup" : "signin");
+              setStatus("Ready");
+            }}
+            style={secondaryButtonStyle}
+          >
+            {mode === "signin"
+              ? "Need an account? Create one"
+              : "Already have an account? Sign in"}
+          </button>
+
+          <div style={statusStyle}>Status: {status}</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={pageStyle}>
       <div style={backgroundGlowOne} />
@@ -440,6 +651,7 @@ export default function App() {
             <p style={subtitleStyle}>
               Track daily P and L, review weekly totals, and monitor your monthly equity curve.
             </p>
+            <p style={{ ...subtitleStyle, marginTop: 8 }}>Signed in as {session.user.email}</p>
           </div>
 
           <div style={heroRightStyle}>
@@ -458,7 +670,7 @@ export default function App() {
                 href="https://discord.com/"
                 target="_blank"
                 rel="noreferrer"
-                style={primaryButtonStyle}
+                style={secondaryButtonStyleLink}
               >
                 Discord
               </a>
@@ -467,23 +679,27 @@ export default function App() {
                 href="https://flowstate-alpha-six.vercel.app/"
                 target="_blank"
                 rel="noreferrer"
-                style={secondaryButtonStyle}
+                style={secondaryButtonStyleLink}
               >
                 Website
               </a>
+
+              <button type="button" onClick={handleSignOut} style={primaryButtonStyleSmall}>
+                Sign Out
+              </button>
             </div>
           </div>
         </header>
 
         <section style={toolbarPanelStyle}>
           <div style={monthNavStyle}>
-            <button type="button" onClick={() => changeMonth(-1)} style={secondaryButtonStyle}>
+            <button type="button" onClick={() => changeMonth(-1)} style={secondaryButtonStyleSmall}>
               Prev
             </button>
 
             <div style={monthLabelStyle}>{monthLabel}</div>
 
-            <button type="button" onClick={() => changeMonth(1)} style={secondaryButtonStyle}>
+            <button type="button" onClick={() => changeMonth(1)} style={secondaryButtonStyleSmall}>
               Next
             </button>
           </div>
@@ -554,8 +770,8 @@ export default function App() {
 
           <div style={statCardStyle}>
             <div style={statLabelStyle}>Storage</div>
-            <div style={statValueStyle}>Local</div>
-            <div style={statHintStyle}>Auto saves in browser</div>
+            <div style={statValueStyle}>Cloud</div>
+            <div style={statHintStyle}>Per account</div>
           </div>
         </section>
 
@@ -709,7 +925,7 @@ export default function App() {
                 Clear Day
               </button>
 
-              <button type="button" onClick={() => setSelectedDay(null)} style={primaryButtonStyle}>
+              <button type="button" onClick={() => setSelectedDay(null)} style={primaryButtonStyleSmall}>
                 Done
               </button>
             </div>
@@ -761,6 +977,17 @@ const shellStyle = {
   zIndex: 1,
 };
 
+const cardStyle = {
+  width: "100%",
+  maxWidth: 460,
+  margin: "80px auto",
+  padding: 24,
+  borderRadius: 24,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  boxShadow: "0 18px 50px rgba(0,0,0,0.28)",
+};
+
 const heroStyle = {
   display: "flex",
   justifyContent: "space-between",
@@ -782,7 +1009,7 @@ const heroRightStyle = {
   alignItems: "flex-end",
   gap: 12,
   width: "100%",
-  maxWidth: 380,
+  maxWidth: 420,
 };
 
 const eyebrowStyle = {
@@ -841,6 +1068,26 @@ const ctaRowStyle = {
   justifyContent: "flex-end",
 };
 
+const formStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+  marginBottom: 14,
+};
+
+const fieldStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+  marginBottom: 14,
+};
+
+const labelStyle = {
+  fontSize: 13,
+  fontWeight: 700,
+  color: "#d4d4d8",
+};
+
 const baseButtonStyle = {
   border: "1px solid rgba(255,255,255,0.10)",
   borderRadius: 16,
@@ -852,16 +1099,35 @@ const baseButtonStyle = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  transition: "transform 0.2s ease, opacity 0.2s ease",
 };
 
 const primaryButtonStyle = {
   ...baseButtonStyle,
   background: "#22c55e",
   color: "#04110a",
+  width: "100%",
+};
+
+const primaryButtonStyleSmall = {
+  ...baseButtonStyle,
+  background: "#22c55e",
+  color: "#04110a",
 };
 
 const secondaryButtonStyle = {
+  ...baseButtonStyle,
+  background: "rgba(255,255,255,0.04)",
+  color: "#ffffff",
+  width: "100%",
+};
+
+const secondaryButtonStyleSmall = {
+  ...baseButtonStyle,
+  background: "rgba(255,255,255,0.04)",
+  color: "#ffffff",
+};
+
+const secondaryButtonStyleLink = {
   ...baseButtonStyle,
   background: "rgba(255,255,255,0.04)",
   color: "#ffffff",
@@ -883,6 +1149,12 @@ const pillStyle = {
   border: "1px solid rgba(255,255,255,0.10)",
   fontSize: 13,
   fontWeight: 700,
+};
+
+const statusStyle = {
+  marginTop: 16,
+  fontSize: 13,
+  color: "#d4d4d8",
 };
 
 const statsGridStyle = {
@@ -1108,26 +1380,6 @@ const closeButtonStyle = {
   lineHeight: 1,
 };
 
-const formGridStyle = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-  gap: 14,
-  marginBottom: 14,
-};
-
-const fieldStyle = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
-  marginBottom: 14,
-};
-
-const labelStyle = {
-  fontSize: 13,
-  fontWeight: 700,
-  color: "#d4d4d8",
-};
-
 const inputStyle = {
   width: "100%",
   borderRadius: 16,
@@ -1153,6 +1405,13 @@ const textareaStyle = {
   boxSizing: "border-box",
 };
 
+const formGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 14,
+  marginBottom: 14,
+};
+
 const editorSummaryStyle = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
@@ -1173,4 +1432,4 @@ const modalActionsStyle = {
   gap: 12,
   flexWrap: "wrap",
   marginTop: 22,
-}
+};
